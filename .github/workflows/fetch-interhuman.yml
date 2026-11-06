@@ -1,7 +1,9 @@
 name: fetch-interhuman
 
 # Runs on a GitHub-hosted runner because this project's network cannot reach
-# drive.google.com at all (TCP 443 blocked), while github.com is reachable.
+# drive.google.com at all (TCP 443 blocked), while the runner can.
+# The downloaded clips are committed into data/ so collaborators can simply
+# clone this private repository instead of talking to Google Drive.
 on:
   workflow_dispatch:
     inputs:
@@ -12,10 +14,10 @@ on:
       workers:
         description: "Parallel Drive connections"
         required: false
-        default: "4"
+        default: "6"
 
 permissions:
-  contents: read
+  contents: write
 
 defaults:
   run:
@@ -24,7 +26,7 @@ defaults:
 jobs:
   fetch:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 240
     steps:
       - uses: actions/checkout@v4
 
@@ -47,14 +49,6 @@ jobs:
           fi
           echo "count=$(wc -l < selected.txt)" >> "$GITHUB_OUTPUT"
 
-      - name: Dry run
-        run: |
-          python download_interhuman.py \
-            --profile profiles/interhuman.json \
-            --ids-file selected.txt \
-            --output out \
-            --dry-run
-
       - name: Download and verify md5
         shell: bash
         run: |
@@ -66,19 +60,33 @@ jobs:
             --workers "${{ github.event.inputs.workers }}" \
             --retries 6 2>&1 | tee fetch.log
 
-      - name: Package
-        if: always()
-        shell: bash
+      - name: Commit clips into data/
+        working-directory: ${{ github.workspace }}
         run: |
-          tar -czf "interhuman-boxing-${{ steps.select.outputs.count }}.tar.gz" -C out .
-          ls -lh ./*.tar.gz
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          mkdir -p data
+          cp -r interhuman-fetch/out/motions interhuman-fetch/out/annots interhuman-fetch/out/split data/
+          cp interhuman-fetch/out/fetch-report.json data/ 2>/dev/null || true
+          git add data
+          if git diff --cached --quiet; then
+            echo "no new clips to commit"
+          else
+            git commit -m "Add ${{ steps.select.outputs.count }} InterHuman clips"
+            git push
+          fi
+
+      - name: Package fallback artifact
+        if: failure()
+        working-directory: ${{ github.workspace }}
+        run: tar -czf interhuman-boxing.tar.gz -C interhuman-fetch/out .
 
       - uses: actions/upload-artifact@v4
-        if: always()
+        if: failure()
         with:
-          name: interhuman-boxing
+          name: interhuman-boxing-fallback
           path: |
-            interhuman-fetch/interhuman-boxing-*.tar.gz
+            interhuman-boxing.tar.gz
             interhuman-fetch/fetch.log
-          retention-days: 30
+          retention-days: 7
           compression-level: 0
